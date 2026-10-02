@@ -15,10 +15,10 @@ function sandbox(configErrors) {
   fs.mkdirSync(path.join(dir, "hypr"))
   fs.writeFileSync(
     path.join(bin, "hyprctl"),
-    "#!/bin/bash\necho \"$1\" >>\"" + dir + "/calls\"\n[[ $1 == configerrors ]] && printf '%s' \"" + configErrors + "\"\nexit 0\n",
+    "#!/bin/bash\necho \"$*\" >>\"" + dir + "/calls\"\n[[ $1 == configerrors ]] && printf '%s' \"" + configErrors + "\"\nexit 0\n",
     { mode: 0o755 }
   )
-  const run = content => spawnSync(script, content === undefined ? [] : [content], {
+  const run = (...args) => spawnSync(script, args, {
     env: { PATH: bin + ":" + process.env.PATH, XDG_CONFIG_HOME: dir, HOME: dir },
     encoding: "utf8"
   })
@@ -70,4 +70,14 @@ test("refuses to write an empty layout", () => {
   fs.writeFileSync(box.file, "old\n")
   assert.equal(box.run().status, 2)
   assert.equal(fs.readFileSync(box.file, "utf8"), "old\n")
+})
+
+test("runs the workspace moves after a successful reload only", () => {
+  const ok = sandbox("")
+  assert.equal(ok.run("new\n", "moves()").status, 0)
+  assert.equal(fs.readFileSync(path.join(ok.dir, "calls"), "utf8"), "reload\nconfigerrors\neval moves()\n")
+
+  const bad = sandbox("broken")
+  assert.equal(bad.run("new\n", "moves()").status, 1)
+  assert.ok(!fs.readFileSync(path.join(bad.dir, "calls"), "utf8").includes("eval"))
 })

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.badr-emil.display-layout",
   "name": "Display Layout",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Badr-Emil",
   "license": "MIT",
-  "description": "Arrange your displays by dragging them into place, right from the Omarchy bar.",
+  "description": "Arrange and rotate your displays and choose which workspace number each one shows, right from the Omarchy bar.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,19 +14,22 @@
   },
   "barWidget": {
     "displayName": "Display Layout",
-    "description": "Shows every connected display as a tile you can drag next to the others. Tiles snap together, the result can be tried live and saved to monitors.lua.",
+    "description": "Shows every connected display as a tile you can drag next to the others, rotate, and give a workspace number. The result can be tried live and saved to monitors.lua.",
     "category": "System",
     "aliases": [
       "display",
       "monitor",
       "screen",
       "arrange",
-      "layout"
+      "layout",
+      "rotate",
+      "workspace"
     ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "hideWithOneDisplay": false
+      "hideWithOneDisplay": false,
+      "pinWorkspaces": true
     },
     "schema": [
       {
@@ -34,6 +37,12 @@
         "type": "boolean",
         "label": "Only show with more than one display",
         "defaultValue": false
+      },
+      {
+        "key": "pinWorkspaces",
+        "type": "boolean",
+        "label": "Choose the workspace number of each display",
+        "defaultValue": true
       }
     ]
   }

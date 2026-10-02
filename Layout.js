@@ -39,6 +39,10 @@ function parseMonitors(raw) {
       scale: Number(m.scale) > 0 ? Number(m.scale) : 1,
       transform: Number(m.transform) || 0,
       focused: m.focused === true,
+      // `active` is the workspace the display shows right now, `workspace`
+      // the number the panel works with (see withPinned).
+      active: m.activeWorkspace ? Number(m.activeWorkspace.id) || 0 : 0,
+      workspace: m.activeWorkspace ? Number(m.activeWorkspace.id) || 0 : 0,
       x: Math.round(Number(m.x) || 0),
       y: Math.round(Number(m.y) || 0),
       w: size.w,
@@ -320,10 +324,41 @@ function row(rects, align) {
   return normalize(out)
 }
 
-function samePositions(a, b) {
+// Turn a display by 90° clockwise around its centre and tuck it back in.
+function rotate(rects, index) {
+  var out = copy(rects)
+  var me = out[index]
+  var cx = me.x + me.w / 2
+  var cy = me.y + me.h / 2
+  me.transform = (me.transform + 1) % 4
+  var size = logicalSize(me.width, me.height, me.scale, me.transform)
+  me.w = size.w
+  me.h = size.h
+  return move(out, index, cx - me.w / 2, cy - me.h / 2)
+}
+
+// Give a display a workspace number. A display that already has that number
+// takes over the old one, so numbers stay unique.
+function assignWorkspace(rects, index, number) {
+  var out = copy(rects)
+  var previous = out[index].workspace
+  for (var i = 0; i < out.length; i++) {
+    if (i !== index && out[i].workspace === number) out[i].workspace = previous
+  }
+  out[index].workspace = number
+  return out
+}
+
+function indexOfWorkspace(rects, number) {
+  for (var i = 0; i < rects.length; i++) if (rects[i].workspace === number) return i
+  return -1
+}
+
+function sameLayout(a, b) {
   if (!a || !b || a.length !== b.length) return false
   for (var i = 0; i < a.length; i++) {
     if (a[i].name !== b[i].name || a[i].x !== b[i].x || a[i].y !== b[i].y) return false
+    if (a[i].transform !== b[i].transform || a[i].workspace !== b[i].workspace) return false
   }
   return true
 }
@@ -345,20 +380,25 @@ function luaString(value) {
   return '"' + String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'
 }
 
-// Walk the uncommented `hl.monitor({ ... })` calls of a monitors.lua.
-function monitorBlocks(text) {
+// Walk the uncommented `hl.<call>({ ... })` rules of a monitors.lua.
+function ruleBlocks(text, call, keyField) {
   var blocks = []
-  var pattern = /hl\.monitor\s*\(\s*\{[^{}]*\}\s*\)/g
+  var pattern = new RegExp("hl\\." + call + "\\s*\\(\\s*\\{[^{}]*\\}\\s*\\)", "g")
+  var key = new RegExp(keyField + "\\s*=\\s*([\"'])(.*?)\\1")
   var match
   while ((match = pattern.exec(text)) !== null) {
     var lineStart = text.lastIndexOf("\n", match.index) + 1
     if (text.slice(lineStart, match.index).indexOf("--") !== -1) continue
 
-    var output = /output\s*=\s*(["'])(.*?)\1/.exec(match[0])
+    var output = key.exec(match[0])
     if (!output) continue
     blocks.push({ start: match.index, text: match[0], output: output[2] })
   }
   return blocks
+}
+
+function monitorBlocks(text) {
+  return ruleBlocks(text, "monitor", "output")
 }
 
 function blockMatches(output, monitor) {
@@ -378,14 +418,64 @@ function blockFor(blocks, monitor) {
 }
 
 var POSITION_FIELD = /position\s*=\s*(["'])([^"']*)\1/
+var TRANSFORM_FIELD = /transform\s*=\s*(\d+)/
 
-// True when monitors.lua already stores exactly these positions.
-function isSaved(text, monitors) {
-  var blocks = monitorBlocks(String(text || ""))
+// The workspace number monitors.lua pins to a display as its default, or 0.
+function pinnedWorkspace(text, monitor) {
+  var rules = ruleBlocks(String(text || ""), "workspace_rule", "monitor")
+  for (var i = rules.length - 1; i >= 0; i--) {
+    if (!blockMatches(rules[i].output, monitor) || !/default\s*=\s*true/.test(rules[i].text)) continue
+    var workspace = /workspace\s*=\s*(["'])(\d+)\1/.exec(rules[i].text)
+    if (workspace) return Number(workspace[2])
+  }
+  return 0
+}
+
+// A display normally shows its pinned workspace, but the user may be looking
+// at another one right now. The panel works with the pinned number so that
+// merely opening it never suggests a change. `raw` is the output of
+// `hyprctl workspacerules -j`, which also knows rules applied but not saved.
+function withPinned(monitors, raw) {
+  var rules = []
+  try {
+    rules = raw ? JSON.parse(String(raw)) : []
+  } catch (e) {
+    rules = []
+  }
+  if (!Array.isArray(rules)) rules = []
+
+  var out = copy(monitors)
+  var taken = {}
+  for (var i = 0; i < out.length; i++) {
+    for (var j = rules.length - 1; j >= 0; j--) {
+      var rule = rules[j]
+      if (!rule || rule.default !== true || rule.enabled === false) continue
+      if (!/^\d+$/.test(String(rule.workspaceString)) || !blockMatches(String(rule.monitor || ""), out[i])) continue
+      var number = Number(rule.workspaceString)
+      if (number > 0 && !taken[number]) {
+        out[i].workspace = number
+        taken[number] = true
+      }
+      break
+    }
+  }
+  return out
+}
+
+// True when monitors.lua already stores exactly this layout.
+function isSaved(text, monitors, workspaces) {
+  var source = String(text || "")
+  var blocks = monitorBlocks(source)
   for (var i = 0; i < monitors.length; i++) {
     var block = blockFor(blocks, monitors[i])
     var position = block ? POSITION_FIELD.exec(block.text) : null
     if (!position || position[2] !== positionString(monitors[i])) return false
+
+    var transform = TRANSFORM_FIELD.exec(block.text)
+    if ((transform ? Number(transform[1]) : 0) !== monitors[i].transform) return false
+
+    if (workspaces && monitors[i].workspace > 0
+        && pinnedWorkspace(source, monitors[i]) !== monitors[i].workspace) return false
   }
   return monitors.length > 0
 }
@@ -414,11 +504,22 @@ function newBlock(monitor, output) {
   return "hl.monitor({ " + fields.join(", ") + " })"
 }
 
-function withPosition(blockText, monitor) {
+// Put the display's position and rotation into an existing rule.
+function withPlacement(blockText, monitor) {
   var position = "position = " + luaString(positionString(monitor))
-  return POSITION_FIELD.test(blockText)
+  var updated = POSITION_FIELD.test(blockText)
     ? blockText.replace(POSITION_FIELD, position)
     : blockText.replace(/(output\s*=\s*(["']).*?\2)/, "$1, " + position)
+
+  var transform = "transform = " + monitor.transform
+  if (TRANSFORM_FIELD.test(updated)) return updated.replace(TRANSFORM_FIELD, transform)
+  if (!monitor.transform) return updated
+  return updated.replace(POSITION_FIELD, function(field) { return field + ", " + transform })
+}
+
+function workspaceRule(monitor, output) {
+  return "hl.workspace_rule({ workspace = " + luaString(monitor.workspace)
+    + ", monitor = " + luaString(output) + ", default = true })"
 }
 
 // A rule can be replayed outside its file only when every value is a plain
@@ -432,37 +533,90 @@ function isSelfContained(blockText) {
   return true
 }
 
+function liveOf(monitor, live) {
+  for (var i = 0; live && i < live.length; i++) if (live[i].name === monitor.name) return live[i]
+  return null
+}
+
 // Re-applying a rule makes the bar on that output restart, so displays that
 // stay where they are get left alone.
 function isUnmoved(monitor, live) {
-  if (!live) return false
-  for (var i = 0; i < live.length; i++) {
-    if (live[i].name === monitor.name) return live[i].x === monitor.x && live[i].y === monitor.y
-  }
-  return false
+  var before = liveOf(monitor, live)
+  return before !== null && before.x === monitor.x && before.y === monitor.y
+    && before.transform === monitor.transform
 }
 
-// Lua for `hyprctl eval` that moves the displays right away. Hyprland
+// Lua that brings every renumbered display's workspace onto it. Moving fails
+// for a workspace that does not exist yet; focusing it on the display then
+// creates it there.
+function workspaceMoves(monitors, live) {
+  var statements = []
+  var focused = 0
+  for (var i = 0; i < monitors.length; i++) {
+    var m = monitors[i]
+    var before = liveOf(m, live)
+    if (before && before.focused) focused = before.active
+    if (m.workspace < 1 || (before && before.workspace === m.workspace)) continue
+
+    var workspace = luaString(m.workspace)
+    var monitor = luaString(m.name)
+    statements.push(
+      "pcall(function() hl.dispatch(hl.dsp.workspace.move({ workspace = " + workspace + ", monitor = " + monitor + " })) end)",
+      "hl.dispatch(hl.dsp.focus({ monitor = " + monitor + " }))",
+      "hl.dispatch(hl.dsp.focus({ workspace = " + workspace + " }))"
+    )
+  }
+  // Leave the user on the workspace they were working in.
+  if (statements.length > 0 && focused > 0) {
+    statements.push("hl.dispatch(hl.dsp.focus({ workspace = " + luaString(focused) + " }))")
+  }
+  return statements.join("\n")
+}
+
+// Lua for `hyprctl eval` that applies the layout right away. Hyprland
 // replaces the whole rule of an output, so the user's own rule is replayed
-// with the new position to keep extras such as vrr or bitdepth.
-function liveScript(text, monitors, live) {
+// with the new placement to keep extras such as vrr or bitdepth.
+function liveScript(text, monitors, live, workspaces) {
   var blocks = monitorBlocks(String(text || ""))
   var statements = []
   for (var i = 0; i < monitors.length; i++) {
     if (isUnmoved(monitors[i], live)) continue
     var block = blockFor(blocks, monitors[i])
     statements.push(block && isSelfContained(block.text)
-      ? withPosition(block.text, monitors[i]).replace(/\s+/g, " ")
+      ? withPlacement(block.text, monitors[i]).replace(/\s+/g, " ")
       : newBlock(monitors[i], monitors[i].name))
+  }
+
+  var moves = workspaces ? workspaceMoves(monitors, live) : ""
+  if (moves !== "") {
+    for (var j = 0; j < monitors.length; j++) {
+      if (monitors[j].workspace > 0) statements.push(workspaceRule(monitors[j], monitors[j].name))
+    }
+    statements.push(moves)
   }
   return statements.join("\n")
 }
 
-// Return monitors.lua with the new positions. Existing rules only get their
-// `position` replaced, so modes, scales and everything else in the file stay
-// as the user wrote them. Displays without a rule get one appended.
-function updateConfig(text, monitors) {
-  var source = String(text || "")
+var WORKSPACES_START = "-- Display Layout: workspace numbers (managed by the panel)"
+var WORKSPACES_END = "-- Display Layout: end of workspace numbers"
+
+function withoutWorkspaceBlock(source) {
+  var start = source.indexOf(WORKSPACES_START)
+  if (start === -1) return source
+  var end = source.indexOf(WORKSPACES_END, start)
+  if (end === -1) return source
+  var before = source.slice(0, start).replace(/\n+$/, "\n")
+  var after = source.slice(end + WORKSPACES_END.length).replace(/^\n+/, "")
+  return before + (after !== "" && before !== "" ? "\n" : "") + after
+}
+
+// Return monitors.lua with the new layout. Existing rules only get their
+// `position` and `transform` replaced, so modes, scales and everything else
+// in the file stay as the user wrote them. Displays without a rule get one
+// appended. With `workspaces`, the pinned workspace numbers are kept in a
+// marked block at the end that is rewritten on every save.
+function updateConfig(text, monitors, workspaces) {
+  var source = withoutWorkspaceBlock(String(text || ""))
   var blocks = monitorBlocks(source)
   var edits = []
   var missing = []
@@ -473,7 +627,7 @@ function updateConfig(text, monitors) {
       missing.push(monitors[i])
       continue
     }
-    edits.push({ start: block.start, length: block.text.length, text: withPosition(block.text, monitors[i]) })
+    edits.push({ start: block.start, length: block.text.length, text: withPlacement(block.text, monitors[i]) })
   }
 
   edits.sort(function(a, b) { return b.start - a.start })
@@ -483,11 +637,25 @@ function updateConfig(text, monitors) {
     source = source.slice(0, edits[j].start) + edits[j].text + source.slice(edits[j].start + edits[j].length)
   }
 
-  if (missing.length > 0) {
+  function section(lines) {
     if (source !== "" && !/\n$/.test(source)) source += "\n"
     if (source !== "") source += "\n"
-    source += "-- Added by Display Layout\n"
-    for (var k = 0; k < missing.length; k++) source += newBlock(missing[k], outputKey(missing[k], monitors)) + "\n"
+    source += lines.join("\n") + "\n"
+  }
+
+  if (missing.length > 0) {
+    var added = ["-- Added by Display Layout"]
+    for (var k = 0; k < missing.length; k++) added.push(newBlock(missing[k], outputKey(missing[k], monitors)))
+    section(added)
+  }
+
+  if (workspaces) {
+    var rules = [WORKSPACES_START]
+    for (var w = 0; w < monitors.length; w++) {
+      if (monitors[w].workspace > 0) rules.push(workspaceRule(monitors[w], outputKey(monitors[w], monitors)))
+    }
+    rules.push(WORKSPACES_END)
+    if (rules.length > 2) section(rules)
   }
   return source
 }
@@ -508,8 +676,14 @@ if (typeof module !== "undefined") {
     move: move,
     place: place,
     row: row,
-    samePositions: samePositions,
+    rotate: rotate,
+    assignWorkspace: assignWorkspace,
+    indexOfWorkspace: indexOfWorkspace,
+    sameLayout: sameLayout,
+    pinnedWorkspace: pinnedWorkspace,
+    withPinned: withPinned,
     isSelfContained: isSelfContained,
+    workspaceMoves: workspaceMoves,
     liveScript: liveScript,
     isSaved: isSaved,
     outputKey: outputKey,

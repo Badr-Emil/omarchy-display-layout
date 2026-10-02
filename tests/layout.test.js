@@ -6,7 +6,8 @@ const Layout = require("../Layout.js")
 function rect(name, x, y, w, h) {
   return {
     name: name, description: name + " display", width: w, height: h,
-    refreshRate: 60, scale: 1, transform: 0, x: x, y: y, w: w, h: h
+    refreshRate: 60, scale: 1, transform: 0, x: x, y: y, w: w, h: h,
+    focused: false, active: 0, workspace: 0
   }
 }
 
@@ -245,4 +246,145 @@ test("liveScript leaves displays alone that did not move", () => {
     "hl.monitor({ output = \"DP-2\", mode = \"1920x1080@60\", position = \"1920x500\", scale = 1 })"
   )
   assert.equal(Layout.liveScript("", [a, b], [a, b]), "")
+})
+
+test("rotate swaps the logical size and keeps the layout valid", () => {
+  const rects = [rect("A", 0, 0, 1920, 1080), rect("B", 1920, 0, 1920, 1080), rect("C", 3840, 0, 1920, 1080)]
+  let turned = Layout.rotate(rects, 1)
+  valid(turned)
+  assert.deepEqual([turned[1].transform, turned[1].w, turned[1].h], [1, 1080, 1920])
+  for (let i = 0; i < 3; i++) turned = Layout.rotate(turned, 1)
+  valid(turned)
+  assert.deepEqual([turned[1].transform, turned[1].w, turned[1].h], [0, 1920, 1080])
+})
+
+test("assignWorkspace swaps numbers so they stay unique", () => {
+  const rects = [rect("A", 0, 0, 1920, 1080), rect("B", 1920, 0, 1920, 1080), rect("C", 3840, 0, 1920, 1080)]
+  rects.forEach((r, i) => { r.workspace = i + 1 })
+  const swapped = Layout.assignWorkspace(rects, 0, 3)
+  assert.deepEqual(swapped.map(r => r.workspace), [3, 2, 1])
+  const fresh = Layout.assignWorkspace(rects, 1, 7)
+  assert.deepEqual(fresh.map(r => r.workspace), [1, 7, 3])
+  assert.equal(Layout.indexOfWorkspace(fresh, 7), 1)
+  assert.equal(Layout.indexOfWorkspace(fresh, 2), -1)
+})
+
+test("sameLayout notices rotation and workspace changes", () => {
+  const a = [rect("A", 0, 0, 1920, 1080)]
+  const b = [rect("A", 0, 0, 1920, 1080)]
+  assert.equal(Layout.sameLayout(a, b), true)
+  b[0].transform = 1
+  assert.equal(Layout.sameLayout(a, b), false)
+  b[0].transform = 0
+  b[0].workspace = 2
+  assert.equal(Layout.sameLayout(a, b), false)
+})
+
+test("updateConfig writes, replaces and removes the rotation", () => {
+  const edp = rect("eDP-2", 0, 0, 1920, 1080)
+  edp.transform = 1
+  const turned = Layout.updateConfig(config, [edp])
+  assert.ok(turned.includes("    position = \"0x0\", transform = 1,\n"))
+  assert.ok(Layout.isSaved(turned, [edp]))
+
+  edp.transform = 3
+  const again = Layout.updateConfig(turned, [edp])
+  assert.ok(again.includes("position = \"0x0\", transform = 3,"))
+
+  edp.transform = 0
+  const flat = Layout.updateConfig(again, [edp])
+  assert.ok(flat.includes("transform = 0"))
+  assert.ok(Layout.isSaved(flat, [edp]))
+  assert.equal(Layout.isSaved(again, [edp]), false)
+})
+
+test("workspace numbers live in a managed block that is rewritten", () => {
+  const edp = rect("eDP-2", 0, 360, 1920, 1080)
+  edp.description = "AU Optronics 0x048E"
+  edp.workspace = 2
+  const dock = rect("DP-3", 1280, 0, 2560, 1440)
+  dock.description = "Lenovo Group Limited C27q-35 URHK8KND"
+  dock.workspace = 1
+
+  const first = Layout.updateConfig(config, [edp, dock], true)
+  assert.ok(first.endsWith([
+    "",
+    "-- Display Layout: workspace numbers (managed by the panel)",
+    "hl.workspace_rule({ workspace = \"2\", monitor = \"eDP-2\", default = true })",
+    "hl.workspace_rule({ workspace = \"1\", monitor = \"desc:Lenovo Group Limited C27q-35 URHK8KND\", default = true })",
+    "-- Display Layout: end of workspace numbers",
+    ""
+  ].join("\n")))
+  assert.equal(Layout.isSaved(first, [edp, dock], true), true)
+  assert.equal(Layout.isSaved(first, [edp, dock], false), true)
+  assert.equal(Layout.pinnedWorkspace(first, dock), 1)
+  assert.equal(Layout.updateConfig(first, [edp, dock], true), first)
+
+  const swapped = Layout.assignWorkspace([edp, dock], 0, 1)
+  assert.equal(Layout.isSaved(first, swapped, true), false)
+  const second = Layout.updateConfig(first, swapped, true)
+  assert.equal(second.split("Display Layout: workspace numbers").length, 2, "one managed block")
+  assert.equal(Layout.pinnedWorkspace(second, dock), 2)
+  assert.equal(Layout.pinnedWorkspace(second, edp), 1)
+
+  const without = Layout.updateConfig(second, swapped, false)
+  assert.ok(!without.includes("workspace_rule"))
+  assert.equal(without, Layout.updateConfig(config, swapped, false))
+})
+
+test("withPinned prefers the pinned number over the workspace in view", () => {
+  const edp = rect("eDP-2", 0, 0, 1920, 1080)
+  edp.active = edp.workspace = 7
+  const dock = rect("DP-3", 1920, 0, 1920, 1080)
+  dock.description = "Lenovo Group Limited C27q-35 URHK8KND"
+  dock.active = dock.workspace = 3
+  const rules = JSON.stringify([
+    { workspaceString: "9", enabled: true, monitor: "eDP-2", default: true },
+    { workspaceString: "2", enabled: true, monitor: "eDP-2", default: true },
+    { workspaceString: "4", enabled: true, monitor: "eDP-2" },
+    { workspaceString: "name:mail", enabled: true, monitor: "eDP-2", default: true },
+    { workspaceString: "5", enabled: true },
+    { workspaceString: "6", enabled: true, monitor: "desc:Lenovo Group Limited C27q-35", default: true }
+  ])
+  const pinned = Layout.withPinned([edp, dock], rules)
+  assert.deepEqual(pinned.map(m => [m.workspace, m.active]), [[2, 7], [6, 3]])
+  assert.deepEqual(Layout.withPinned([edp, dock], "").map(m => m.workspace), [7, 3])
+  assert.deepEqual(Layout.withPinned([edp, dock], "garbage").map(m => m.workspace), [7, 3])
+})
+
+test("workspaceMoves only touches renumbered displays and restores the focus", () => {
+  const a = rect("DP-1", 0, 0, 1920, 1080)
+  const b = rect("DP-2", 1920, 0, 1920, 1080)
+  const c = rect("DP-3", 3840, 0, 1920, 1080)
+  ;[a, b, c].forEach((r, i) => { r.active = r.workspace = i + 1 })
+  c.focused = true
+  c.active = 8
+  const swapped = Layout.assignWorkspace([a, b, c], 0, 2)
+  assert.equal(Layout.workspaceMoves([a, b, c], [a, b, c]), "")
+  assert.equal(Layout.workspaceMoves(swapped, [a, b, c]), [
+    "pcall(function() hl.dispatch(hl.dsp.workspace.move({ workspace = \"2\", monitor = \"DP-1\" })) end)",
+    "hl.dispatch(hl.dsp.focus({ monitor = \"DP-1\" }))",
+    "hl.dispatch(hl.dsp.focus({ workspace = \"2\" }))",
+    "pcall(function() hl.dispatch(hl.dsp.workspace.move({ workspace = \"1\", monitor = \"DP-2\" })) end)",
+    "hl.dispatch(hl.dsp.focus({ monitor = \"DP-2\" }))",
+    "hl.dispatch(hl.dsp.focus({ workspace = \"1\" }))",
+    "hl.dispatch(hl.dsp.focus({ workspace = \"8\" }))"
+  ].join("\n"))
+
+  const script = Layout.liveScript("", swapped, [a, b, c], true)
+  assert.ok(script.startsWith("hl.workspace_rule({ workspace = \"2\", monitor = \"DP-1\", default = true })\n"))
+  assert.ok(!script.includes("hl.monitor("), "unmoved displays keep their rule")
+  assert.equal(Layout.liveScript("", swapped, [a, b, c], false), "")
+})
+
+test("liveScript re-applies a rotated display", () => {
+  const a = rect("DP-1", 0, 0, 1920, 1080)
+  const b = rect("DP-2", 1920, 0, 1920, 1080)
+  const turned = Layout.rotate([a, b], 1)
+  // Turning around the centre lifts the display, so its neighbour shifts too.
+  assert.equal(Layout.liveScript("", turned, [a, b], true), [
+    "hl.monitor({ output = \"DP-1\", mode = \"1920x1080@60\", position = \"0x420\", scale = 1 })",
+    "hl.monitor({ output = \"DP-2\", mode = \"1920x1080@60\", position = \"1920x0\", scale = 1, transform = 1 })"
+  ].join("\n"))
+  assert.equal(Layout.liveScript("", turned, turned, true), "")
 })

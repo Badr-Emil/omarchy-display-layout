@@ -15,6 +15,7 @@ Panel {
   // shows. They differ while the user has moved tiles without applying.
   property var live: []
   property var arrangement: []
+  property string monitorsJson: ""
   property string configText: ""
   property int selected: 0
   property string lastSide: ""
@@ -23,8 +24,11 @@ Panel {
   property bool identifying: false
 
   readonly property var alignments: ["center", "start", "end"]
-  readonly property bool changed: !Logic.samePositions(arrangement, live)
-  readonly property bool saved: Logic.isSaved(configText, live)
+  readonly property var workspaceNumbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  readonly property var rotations: ["", "rotated 90°", "upside down", "rotated 270°"]
+  readonly property bool pinWorkspaces: setting("pinWorkspaces", true) !== false
+  readonly property bool changed: !Logic.sameLayout(arrangement, live)
+  readonly property bool saved: Logic.isSaved(configText, live, pinWorkspaces)
   readonly property bool busy: applyProcess.running || saveProcess.running
   readonly property var current: arrangement[selected] || null
 
@@ -51,7 +55,7 @@ Panel {
     var m = current
     if (!m) return ""
     var label = /^(eDP|LVDS|DSI)/.test(m.name) ? "Built-in display" : m.model !== "" ? m.model : m.description
-    return (selected + 1) + " · " + m.name + (label !== "" ? " · " + label : "")
+    return labelOf(selected) + " · " + m.name + (label !== "" ? " · " + label : "")
   }
 
   readonly property string currentDetails: {
@@ -59,6 +63,7 @@ Panel {
     if (!m) return ""
     return m.width + "×" + m.height + " @ " + Math.round(m.refreshRate) + " Hz"
       + (m.scale !== 1 ? " · scale " + m.scale : "")
+      + (m.transform ? " · " + rotations[m.transform % 4] : "")
       + " · at " + m.x + "×" + m.y
   }
 
@@ -67,16 +72,43 @@ Panel {
     configFile.reload()
   }
 
-  function applyMonitors(output) {
-    live = Logic.parseMonitors(output)
-    arrangement = Logic.copy(live)
+  // Edits that are not applied yet survive a refresh, anything else follows
+  // what Hyprland reports.
+  function rebuild(rulesJson) {
+    var hadEdits = changed
+    var parsed = Logic.parseMonitors(monitorsJson)
+    live = pinWorkspaces ? Logic.withPinned(parsed, rulesJson) : parsed
+    if (!hadEdits || arrangement.length !== live.length) arrangement = Logic.copy(live)
     selected = Math.max(0, Math.min(selected, arrangement.length - 1))
+  }
+
+  // The number a display goes by: its workspace, or its position in the list
+  // when workspace numbers are not managed here.
+  function labelOf(index) {
+    var m = arrangement[index]
+    if (!m) return ""
+    return pinWorkspaces && m.workspace > 0 ? String(m.workspace) : String(index + 1)
   }
 
   function select(index) {
     if (index < 0 || index >= arrangement.length) return
     selected = index
     lastSide = ""
+  }
+
+  function selectLabel(label) {
+    for (var i = 0; i < arrangement.length; i++) if (labelOf(i) === label) return select(i)
+  }
+
+  function setWorkspace(number) {
+    if (!pinWorkspaces || !current || number < 1 || number > workspaceNumbers.length) return
+    arrangement = Logic.assignWorkspace(arrangement, selected, number)
+  }
+
+  function rotate() {
+    if (!current) return
+    lastSide = ""
+    arrangement = Logic.rotate(arrangement, selected)
   }
 
   // Arrow keys and the side buttons: the first press moves the selected
@@ -102,14 +134,18 @@ Panel {
   function apply() {
     if (busy || arrangement.length === 0) return
     error = ""
-    applyProcess.command = ["hyprctl", "eval", Logic.liveScript(configText, arrangement, live)]
+    applyProcess.command = ["hyprctl", "eval", Logic.liveScript(configText, arrangement, live, pinWorkspaces)]
     applyProcess.running = true
   }
 
   function save() {
     if (busy || arrangement.length === 0) return
     error = ""
-    saveProcess.command = [pluginPath + "scripts/save-layout", Logic.updateConfig(configText, arrangement)]
+    saveProcess.command = [
+      pluginPath + "scripts/save-layout",
+      Logic.updateConfig(configText, arrangement, pinWorkspaces),
+      pinWorkspaces ? Logic.workspaceMoves(arrangement, live) : ""
+    ]
     saveProcess.running = true
   }
 
@@ -118,15 +154,16 @@ Panel {
     identifyTimer.restart()
   }
 
-  function numberOf(name) {
-    for (var i = 0; i < arrangement.length; i++) if (arrangement[i].name === name) return i + 1
-    return 0
+  function labelOfScreen(name) {
+    for (var i = 0; i < arrangement.length; i++) if (arrangement[i].name === name) return labelOf(i)
+    return ""
   }
 
   onOpenedChanged: {
     if (opened) {
       error = ""
       lastSide = ""
+      arrangement = Logic.copy(live)
       refresh()
     }
   }
@@ -140,7 +177,20 @@ Panel {
     command: ["hyprctl", "monitors", "-j"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applyMonitors(text)
+      onStreamFinished: {
+        root.monitorsJson = text
+        if (root.pinWorkspaces) rulesProcess.running = true
+        else root.rebuild("")
+      }
+    }
+  }
+
+  Process {
+    id: rulesProcess
+    command: ["hyprctl", "workspacerules", "-j"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.rebuild(text)
     }
   }
 
@@ -193,10 +243,10 @@ Panel {
     PanelWindow {
       id: badge
       required property var modelData
-      readonly property int number: root.numberOf(modelData.name)
+      readonly property string label: root.labelOfScreen(modelData.name)
 
       screen: modelData
-      visible: number > 0
+      visible: label !== ""
       anchors { top: true; left: true }
       margins { top: Style.space(48); left: Style.space(48) }
       implicitWidth: badgeCard.width
@@ -224,7 +274,7 @@ Panel {
 
           Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: badge.number
+            text: badge.label
             color: Color.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.displayLarge * 3
@@ -276,7 +326,10 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
-        if (text >= "1" && text <= "9") root.select(Number(text) - 1)
+        if (text >= "0" && text <= "9") root.selectLabel(text === "0" ? "10" : text)
+        else if (text === "+") root.setWorkspace(root.current ? root.current.workspace + 1 : 0)
+        else if (text === "-") root.setWorkspace(root.current ? root.current.workspace - 1 : 0)
+        else if (text === "t") root.rotate()
         else if (text === "i") root.identify()
         else if (text === "r") root.lineUp()
         else if (text === "u") root.discard()
@@ -345,7 +398,7 @@ Panel {
 
             PanelActionButton {
               iconText: "󰎠"
-              tooltipText: "Show the numbers on the screens (i)"
+              tooltipText: "Show each display's number on its screen (i)"
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: root.identify()
@@ -425,7 +478,7 @@ Panel {
                 Text {
                   width: parent.width
                   horizontalAlignment: Text.AlignHCenter
-                  text: tile.index + 1
+                  text: root.labelOf(tile.index)
                   color: tile.isSelected ? Color.accent : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.title
@@ -567,6 +620,57 @@ Panel {
           }
         }
 
+        // ---------- Workspace number · rotation ----------
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(numberRow.implicitHeight, rotateButton.implicitHeight)
+          visible: root.current !== null
+
+          Row {
+            id: numberRow
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(3)
+            visible: root.pinWorkspaces
+
+            Repeater {
+              model: root.workspaceNumbers
+
+              Button {
+                required property int modelData
+                readonly property int owner: Logic.indexOfWorkspace(root.arrangement, modelData)
+                text: modelData
+                selected: root.current !== null && root.current.workspace === modelData
+                opacity: selected || owner === -1 ? 1 : 0.55
+                tooltipText: selected ? "This display shows workspace " + modelData
+                  : owner === -1 ? "Show workspace " + modelData + " on this display"
+                  : "Swap numbers with " + root.arrangement[owner].name
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: Style.space(7)
+                verticalPadding: Style.space(4)
+                onClicked: root.setWorkspace(modelData)
+              }
+            }
+          }
+
+          Button {
+            id: rotateButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "󰑧"
+            text: "Rotate"
+            tooltipText: "Turn this display by 90° (t)"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            verticalPadding: Style.space(4)
+            bordered: true
+            onClicked: root.rotate()
+          }
+        }
+
         Text {
           width: parent.width
           visible: root.error !== ""
@@ -606,7 +710,7 @@ Panel {
             opacity: enabled ? 1 : 0.4
             iconText: "󰆓"
             text: "Save"
-            tooltipText: "Write the positions to ~/.config/hypr/monitors.lua.\nThe previous file is kept as a backup."
+            tooltipText: "Write the layout to ~/.config/hypr/monitors.lua.\nThe previous file is kept as a backup."
             foreground: root.foreground
             fontFamily: root.fontFamily
             bordered: true
@@ -616,7 +720,9 @@ Panel {
 
         Text {
           width: parent.width
-          text: "Drag a display · 1–9 select · arrows move · Enter apply"
+          text: root.pinWorkspaces
+            ? "Drag a display · arrows move · t rotate · + − number · Enter apply"
+            : "Drag a display · 1–9 select · arrows move · t rotate · Enter apply"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

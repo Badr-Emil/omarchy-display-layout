@@ -1,15 +1,20 @@
 #!/bin/bash
 
 # Store a new monitors.lua and let Hyprland load it.
-# Usage: save-layout <file content>
+# Usage: save-layout <file content> [lua to run once the file is loaded]
 #
 # The previous file is kept as monitors.lua.display-layout-<time>.bak, and is
 # put back when Hyprland rejects the new one.
 
 set -euo pipefail
 
+# Hyprland restarts the bar on every display that moves, which takes the
+# panel that started this script down with it. Finish the job regardless.
+trap '' TERM HUP
+
 config="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/monitors.lua"
 content="${1:-}"
+after="${2:-}"
 keep_backups=5
 
 if [[ -z $content ]]; then
@@ -41,6 +46,11 @@ if [[ -n ${errors//[[:space:]]/} ]]; then
   echo "Hyprland rejected the layout, the previous monitors.lua was restored" >&2
   echo "$errors" >&2
   exit 1
+fi
+
+# The file pins the workspace numbers; this brings the workspaces over now
+if [[ -n $after ]]; then
+  hyprctl eval "$after" >/dev/null || echo "Could not move the workspaces to their displays" >&2
 fi
 
 # Only this script's own backups are pruned
