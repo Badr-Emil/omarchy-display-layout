@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# Store a new monitors.lua and let Hyprland load it.
+# Usage: save-layout <file content>
+#
+# The previous file is kept as monitors.lua.display-layout-<time>.bak, and is
+# put back when Hyprland rejects the new one.
+
+set -euo pipefail
+
+config="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/monitors.lua"
+content="${1:-}"
+keep_backups=5
+
+if [[ -z $content ]]; then
+  echo "No layout given" >&2
+  exit 2
+fi
+
+mkdir -p "$(dirname "$config")"
+
+backup=""
+if [[ -e $config ]]; then
+  backup="${config%.lua}.lua.display-layout-$(date +%Y%m%d-%H%M%S).bak"
+  cp -p "$config" "$backup"
+fi
+
+# Written in place so a symlinked monitors.lua keeps pointing into its dotfiles
+printf '%s' "$content" >"$config"
+
+hyprctl reload >/dev/null
+errors="$(hyprctl configerrors)"
+
+if [[ -n ${errors//[[:space:]]/} ]]; then
+  if [[ -n $backup ]]; then
+    cat "$backup" >"$config"
+  else
+    rm -f "$config"
+  fi
+  hyprctl reload >/dev/null
+  echo "Hyprland rejected the layout, the previous monitors.lua was restored" >&2
+  echo "$errors" >&2
+  exit 1
+fi
+
+# Only this script's own backups are pruned
+find "$(dirname "$config")" -maxdepth 1 -name 'monitors.lua.display-layout-*.bak' -printf '%f\n' |
+  sort -r | tail -n +$((keep_backups + 1)) |
+  while read -r old; do rm -f "$(dirname "$config")/$old"; done

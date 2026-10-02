@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.badr-emil.display-layout",
+  "name": "Display Layout",
+  "version": "1.0.0",
+  "author": "Badr-Emil",
+  "license": "MIT",
+  "description": "Arrange your displays by dragging them into place, right from the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Display Layout",
+    "description": "Shows every connected display as a tile you can drag next to the others. Tiles snap together, the result can be tried live and saved to monitors.lua.",
+    "category": "System",
+    "aliases": [
+      "display",
+      "monitor",
+      "screen",
+      "arrange",
+      "layout"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "hideWithOneDisplay": false
+    },
+    "schema": [
+      {
+        "key": "hideWithOneDisplay",
+        "type": "boolean",
+        "label": "Only show with more than one display",
+        "defaultValue": false
+      }
+    ]
+  }
+}
