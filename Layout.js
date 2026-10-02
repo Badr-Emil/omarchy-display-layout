@@ -377,7 +377,10 @@ function positionString(m) {
 }
 
 function luaString(value) {
-  return '"' + String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'
+  // Display names come from the hardware (EDID), so nothing in them may end
+  // the string early.
+  return '"' + String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n").replace(/\r/g, "\\r") + '"'
 }
 
 // Walk the uncommented `hl.<call>({ ... })` rules of a monitors.lua.
@@ -682,6 +685,7 @@ if (typeof module !== "undefined") {
     sameLayout: sameLayout,
     pinnedWorkspace: pinnedWorkspace,
     withPinned: withPinned,
+    luaString: luaString,
     isSelfContained: isSelfContained,
     workspaceMoves: workspaceMoves,
     liveScript: liveScript,

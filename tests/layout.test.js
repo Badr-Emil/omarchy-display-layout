@@ -388,3 +388,13 @@ test("liveScript re-applies a rotated display", () => {
   ].join("\n"))
   assert.equal(Layout.liveScript("", turned, turned, true), "")
 })
+
+test("display names cannot break out of the generated Lua", () => {
+  assert.equal(Layout.luaString('a"b\\c\nd'), '"a\\"b\\\\c\\nd"')
+  const evil = rect("DP-9", 0, 0, 1920, 1080)
+  evil.description = 'X" }) os.execute("id") --'
+  evil.workspace = 1
+  const out = Layout.updateConfig("", [evil], true)
+  assert.ok(out.includes('output = "desc:X\\" }) os.execute(\\"id\\") --"'))
+  assert.ok(!/[^\\]" \}\) os\.execute/.test(out))
+})
